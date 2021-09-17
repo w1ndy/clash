@@ -90,6 +90,42 @@ func (r *Resolver) Exchange(m *D.Msg) (msg *D.Msg, err error) {
 	return r.ExchangeContext(context.Background(), m)
 }
 
+func (r *Resolver) extractDnsCookie(m *D.Msg) (string, error) {
+	if edns0 := m.IsEdns0(); edns0 != nil {
+		for _, opt := range edns0.Option {
+			if opt.Option() == D.EDNS0COOKIE {
+				return opt.(*D.EDNS0_COOKIE).Cookie, nil
+			}
+		}
+	}
+	return "", errors.New("no dns cookie")
+}
+
+func (r *Resolver) syncDnsCookie(request *D.Msg, response *D.Msg) {
+	if cookie, err := r.extractDnsCookie(request); err == nil {
+		c := new(D.EDNS0_COOKIE)
+		c.Code = D.EDNS0COOKIE
+		c.Cookie = cookie + "deadbeefdeadbeef"
+
+		edns0 := response.IsEdns0()
+		if edns0 == nil {
+			edns0 = new(D.OPT)
+			edns0.Hdr.Name = "."
+			edns0.Hdr.Rrtype = D.TypeOPT
+			response.Extra = append(response.Extra, edns0)
+		}
+
+		for i, opt := range edns0.Option {
+			if opt.Option() == D.EDNS0COOKIE {
+				edns0.Option[i] = c
+				return
+			}
+		}
+
+		edns0.Option = append(edns0.Option, c)
+	}
+}
+
 // ExchangeContext a batch of dns request with context.Context, and it use cache
 func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, err error) {
 	if len(m.Question) == 0 {
@@ -101,6 +137,7 @@ func (r *Resolver) ExchangeContext(ctx context.Context, m *D.Msg) (msg *D.Msg, e
 	if hit {
 		now := time.Now()
 		msg = cache.(*D.Msg).Copy()
+		r.syncDnsCookie(m, msg)
 		if expireTime.Before(now) {
 			setMsgTTL(msg, uint32(1)) // Continue fetch
 			go r.exchangeWithoutCache(ctx, m)
@@ -143,6 +180,7 @@ func (r *Resolver) exchangeWithoutCache(ctx context.Context, m *D.Msg) (msg *D.M
 		if shared {
 			msg = msg.Copy()
 		}
+		r.syncDnsCookie(m, msg)
 	}
 
 	return
